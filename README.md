@@ -35,6 +35,7 @@ window with one key.
 - **Keyboard-first.** On an empty desktop the arrow keys move between cards, Enter goes, Space plays or pauses. `SUPER + ALT + D` brings everything over your windows.
 - **Yours.** Every card can go to any corner, top, bottom or center, or be hidden. Size, background, language, screens: change them in a settings panel, no JSON needed.
 - **Native.** It is an Omarchy shell plugin: it follows your theme, font and bar position the moment you change them.
+- **Light.** No extra runtime, no hooks to install in your agents, no daemon: four small Python scripts that ship with the plugin, and the system card only refreshes while you can see it.
 - **Private.** Everything is read locally from `/proc`, `/sys` and the agents' own state files. No network, no telemetry, no conversation content.
 
 <div align="center">
