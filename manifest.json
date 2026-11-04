@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.harold15000.eyemarchy",
+  "name": "Eyemarchy",
+  "version": "1.0.0",
+  "author": "Harold Jimenez",
+  "license": "MIT",
+  "description": "Your empty desktop, alive: live AI agents (Claude Code, Codex, opencode, Hermes…), now playing, system and a big clock. Keyboard-first, theme-aware, one shortcut to see it over your windows.",
+  "kinds": [
+    "service"
+  ],
+  "entryPoints": {
+    "service": "Desktop.qml"
+  }
+}

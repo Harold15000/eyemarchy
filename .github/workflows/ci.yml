@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Manifest
+        run: |
+          jq -e '.schemaVersion == 1' manifest.json
+          jq -e '.id | test("^[A-Za-z0-9][A-Za-z0-9._-]*$") and (startswith("omarchy.") | not)' manifest.json
+          for f in name version kinds entryPoints; do jq -e --arg f "$f" 'has($f)' manifest.json; done
+          jq -r '.entryPoints[]' manifest.json | while read -r ep; do
+            case "$ep" in /*|*..*) echo "unsafe entry point: $ep"; exit 1 ;; esac
+            test -f "$ep" || { echo "missing entry point: $ep"; exit 1; }
+          done
+          test -z "$(find . -type l -not -path './.git/*')" || { echo "symlinks are not allowed"; exit 1; }
+
+      - name: Python collectors
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Settings and translations
+        run: node --test tests/*.mjs
+
+      - name: Scripts compile
+        run: python3 -m py_compile scripts/*.py
