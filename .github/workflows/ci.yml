@@ -1,8 +1,8 @@
 name: CI
 
+# Manual for now: run it from the Actions tab. Locally: see CONTRIBUTING.md.
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
