@@ -25,7 +25,7 @@ node --test tests/*.mjs                    # settings, translations, demo data
 omarchy plugin validate .                  # the manifest, as the shell checks it
 ```
 
-CI runs the first two on every push.
+Run them before opening a pull request.
 
 ## Layout
 

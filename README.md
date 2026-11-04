@@ -7,7 +7,6 @@
 Live AI agents, now playing, system and a big clock on your [Omarchy](https://omarchy.org) desktop.
 Keyboard-first, painted in your theme, and one shortcut away when your windows cover it.
 
-[![CI](https://github.com/Harold15000/eyemarchy/actions/workflows/ci.yml/badge.svg)](https://github.com/Harold15000/eyemarchy/actions/workflows/ci.yml)
 ![Omarchy 4](https://img.shields.io/badge/Omarchy-4-8a7cff)
 ![License MIT](https://img.shields.io/badge/license-MIT-green)
 
