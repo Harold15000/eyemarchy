@@ -203,17 +203,20 @@ def attach(sid, cwd=""):
 
 
 def descendants(pid):
-    kids = {}
+    """[(pid, starttime)] of every process below pid."""
+    kids, starts = {}, {}
     for name in os.listdir("/proc"):
         if name.isdigit():
             st = stat(int(name))
             if st:
                 kids.setdefault(st["ppid"], []).append(int(name))
-    out, stack = [], list(kids.get(pid, []))
+                starts[int(name)] = st["start"]
+    out, seen, stack = [], set(), list(kids.get(pid, []))
     while stack:
         p = stack.pop()
-        if p not in out:
-            out.append(p)
+        if p not in seen:
+            seen.add(p)
+            out.append((p, starts[p]))
             stack.extend(kids.get(p, []))
     return out
 
@@ -221,6 +224,28 @@ def descendants(pid):
 def alive(pid, start):
     st = stat(pid)
     return st is not None and st["start"] == int(start) and st["state"] not in ("Z", "X")
+
+
+def send(pid, start, sig):
+    """Signal pid only if it is still the process we listed. The pidfd is
+    opened first and the start time checked after, so a pid reused in between
+    can never receive the signal."""
+    fd = None
+    try:
+        if hasattr(os, "pidfd_open"):
+            fd = os.pidfd_open(pid)
+        if not alive(pid, start):
+            return False
+        if fd is not None:
+            signal.pidfd_send_signal(fd, sig)
+        else:
+            os.kill(pid, sig)
+        return True
+    except OSError:
+        return False
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 def closable(pid):
@@ -245,12 +270,8 @@ def close(pid, start):
         return "gone"
     if not closable(pid):
         return "error"
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return "gone"
-    except PermissionError:
-        return "error"
+    if not send(pid, start, signal.SIGTERM):
+        return "gone" if not alive(pid, start) else "error"
     for _ in range(30):
         time.sleep(0.1)
         if not alive(pid, start):
@@ -264,13 +285,10 @@ def kill(pid, start):
         return "gone"
     if not closable(pid):
         return "error"
-    for p in [pid] + descendants(pid):
-        try:
-            if os.stat(f"/proc/{p}").st_uid != UID:
-                continue
-            os.kill(p, signal.SIGKILL)
-        except Exception:
-            pass
+    # The app and everything it started, with the same checks for each one.
+    for p, s in [(pid, int(start))] + descendants(pid):
+        if p == pid or closable(p):
+            send(p, s, signal.SIGKILL)
     for _ in range(20):
         time.sleep(0.05)
         if not alive(pid, start):

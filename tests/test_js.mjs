@@ -57,6 +57,7 @@ test("bad values fall back or clamp", () => {
 test("screens accepts a list of outputs", () => {
   assert.deepEqual(plain(Settings.normalize({ screens: ["DP-1", "DP-1", "eDP-1"] }).screens), ["DP-1", "eDP-1"])
   assert.equal(Settings.normalize({ screens: "focused" }).screens, "focused")
+  assert.equal(Settings.normalize({ screens: [] }).screens, "all")
 })
 
 test("diff writes only what changed", () => {

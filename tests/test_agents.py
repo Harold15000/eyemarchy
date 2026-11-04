@@ -1,4 +1,6 @@
 """Tests for scripts/agents.py. Run with: python3 -m unittest discover -s tests"""
+import contextlib
+import io
 import json
 import os
 import sqlite3
@@ -184,11 +186,166 @@ class Usage(unittest.TestCase):
         self.assertEqual(agents.short_window("Credits"), "")
 
 
-class Main(unittest.TestCase):
+class Detection(unittest.TestCase):
+    def test_program_name(self):
+        self.assertTrue(agents.is_cmd(["pi"], {"pi"}))
+        self.assertTrue(agents.is_cmd(["/home/u/.local/bin/aider", "--model", "x"], {"aider"}))
+
+    def test_script_of_an_interpreter(self):
+        self.assertTrue(agents.is_cmd(["node", "/usr/bin/gemini"], {"gemini"}))
+        self.assertTrue(agents.is_cmd(["node", "--no-warnings", "/usr/bin/gemini"], {"gemini"}))
+        self.assertTrue(agents.is_cmd(["python3.14", "/home/u/.local/bin/aider"], {"aider"}))
+        self.assertTrue(agents.is_cmd(["python3", "-m", "aider"], {"aider"}))
+
+    def test_an_argument_is_not_the_program(self):
+        for argv, names in [(["nvim", "pi"], {"pi"}), (["ping", "pi"], {"pi"}),
+                            (["less", "goose"], {"goose"}), (["vim", "hermes"], {"hermes"}),
+                            (["git", "crush"], {"crush"}), (["python3", "-c", "pi"], {"pi"})]:
+            self.assertFalse(agents.is_cmd(argv, names), argv)
+
+    def matcher(self, gid):
+        return next(m for g, _, _, m in agents.PROCESS_AGENTS if g == gid)
+
+    def test_shared_names(self):
+        goose, copilot = self.matcher("goose"), self.matcher("copilot")
+        self.assertTrue(goose(["goose", "session"], 1))
+        self.assertFalse(goose(["goose", "postgres", "dbstring", "up"], 1))
+        self.assertFalse(goose(["goose", "up"], 1))
+        self.assertTrue(copilot(["node", "/usr/bin/copilot"], 1))
+        self.assertTrue(copilot(["copilot", "--model", "x"], 1))
+        self.assertFalse(copilot(["copilot", "svc", "deploy"], 1))
+
+    def test_amp_is_not_the_editor(self):
+        with tempfile.TemporaryDirectory() as fakeproc:
+            for pid, exe in [(1, "/usr/bin/amp"), (2, "/home/u/.amp/bin/amp")]:
+                os.makedirs(os.path.join(fakeproc, str(pid)))
+                os.symlink(exe, os.path.join(fakeproc, str(pid), "exe"))
+            self.assertFalse(agents.is_amp(["amp", "notes.txt"], 1, fakeproc))
+            self.assertTrue(agents.is_amp(["amp"], 2, fakeproc))
+        self.assertTrue(agents.is_amp(["node", "/usr/bin/amp"], 3))
+
+    def test_hermes_launcher(self):
+        code = "import sys\nfrom hermes_cli.main import main\nsys.exit(main())"
+        hermes = self.matcher("hermes")
+        self.assertTrue(hermes(["python3", "-I", "-c", code], 1))
+        self.assertTrue(agents.is_server(["python3", "-I", "-c", code, "gateway", "run"]))
+        self.assertFalse(agents.is_server(["python3", "-I", "-c", code, "-p", "work"]))
+        procs = {1: proc(["python3", "-I", "-c", code], ppid=0),
+                 2: proc(["python3", "-I", "-c", code, "gateway", "run"], ppid=0)}
+        rows = agents.process_agents(procs, agents.children_map(procs), agents.Tracker({}),
+                                     "hermes", {"hermes"}, hermes)
+        self.assertEqual([r["target"]["pid"] for r in rows], [1])
+
+
+def fake_claude(fakeproc, pid, start=500):
+    os.makedirs(os.path.join(fakeproc, str(pid)), exist_ok=True)
+    with open(os.path.join(fakeproc, str(pid), "cmdline"), "wb") as f:
+        f.write(b"claude\0")
+    with open(os.path.join(fakeproc, str(pid), "stat"), "w") as f:
+        f.write(f"{pid} (claude) S 1 " + " ".join(["0"] * 17) + f" {start} 0\n")
+
+
+class ClaudeOddFiles(unittest.TestCase):
+    def rows(self, sessions):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as fakeproc:
+            sess = os.path.join(home, ".claude", "sessions")
+            os.makedirs(sess)
+            for i, d in enumerate(sessions):
+                with open(os.path.join(sess, f"{i}.json"), "w") as f:
+                    f.write(d if isinstance(d, str) else json.dumps(d))
+                if isinstance(d, dict) and isinstance(d.get("pid"), int):
+                    fake_claude(fakeproc, d["pid"])
+            old = os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            try:
+                return agents.claude_code(agents.Tracker({}), home=home, proc=fakeproc)
+            finally:
+                if old is not None:
+                    os.environ["CLAUDE_CONFIG_DIR"] = old
+
+    def test_spare_workers_are_not_sessions(self):
+        rows = self.rows([{"pid": 7, "status": "idle", "kind": "bg", "spare": True, "sessionId": "abcd1234"},
+                          {"pid": 8, "status": "busy", "kind": "interactive", "cwd": "/src/app"}])
+        self.assertEqual([r["name"] for r in rows], ["app"])
+
+    def test_reused_pid(self):
+        rows = self.rows([{"pid": 7, "status": "busy", "procStart": 499, "cwd": "/src/old"},
+                          {"pid": 8, "status": "busy", "procStart": 500, "cwd": "/src/new"}])
+        self.assertEqual([r["name"] for r in rows], ["new"])
+
+    def test_odd_values_do_not_break_the_others(self):
+        rows = self.rows(["not json", [1, 2],
+                          {"pid": 7, "status": "busy", "statusUpdatedAt": "2026-11-04T10:00:00Z", "cwd": "/src/a"},
+                          {"pid": 8, "status": "idle", "name": 42, "cwd": None},
+                          {"pid": "x", "status": "busy"}])
+        self.assertEqual(sorted(r["name"] for r in rows), ["42", "a"])
+        iso = [r for r in rows if r["name"] == "a"][0]
+        self.assertEqual(iso["since"], 1793786400000)
+
+
+class TempRuntime(unittest.TestCase):
+    """collect() saves its state: never touch the one of the plugin running here."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._env = os.environ.get("XDG_RUNTIME_DIR")
+        os.environ["XDG_RUNTIME_DIR"] = self._tmp.name
+
+    def tearDown(self):
+        if self._env is None:
+            os.environ.pop("XDG_RUNTIME_DIR", None)
+        else:
+            os.environ["XDG_RUNTIME_DIR"] = self._env
+        self._tmp.cleanup()
+
+
+class Robust(TempRuntime):
+    def test_odd_usage_records(self):
+        with tempfile.TemporaryDirectory() as home:
+            base = os.path.join(home, "state", "omarchy", "agents", "usage")
+            os.makedirs(base)
+            for name, rec in [("a", ["x"]), ("b", {"limits": ["x", 3, None]}), ("c", {"limits": "x"}),
+                              ("codex", {"id": "codex", "limits": [{"percent": "0.5", "label": 7}]})]:
+                with open(os.path.join(base, name + ".json"), "w") as f:
+                    json.dump(rec, f)
+            old = os.environ.get("XDG_STATE_HOME")
+            os.environ["XDG_STATE_HOME"] = os.path.join(home, "state")
+            try:
+                usage = agents.usage_records(home)
+            finally:
+                if old is None:
+                    os.environ.pop("XDG_STATE_HOME")
+                else:
+                    os.environ["XDG_STATE_HOME"] = old
+        self.assertEqual(list(usage), ["codex"])
+        self.assertEqual(usage["codex"]["percent"], 0.5)
+
+    def test_a_broken_source_does_not_stop_the_rest(self):
+        broken = agents.claude_code
+        agents.claude_code = lambda *a, **k: 1 / 0
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                out = agents.collect({"usage": False, "hide": "not a list"})
+        finally:
+            agents.claude_code = broken
+        self.assertNotIn("claude", [g["id"] for g in out["groups"]])
+
+    def test_codex_never_shows_the_first_message(self):
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "state_9.sqlite")
+            con = sqlite3.connect(db)
+            con.execute("CREATE TABLE threads (id TEXT, title TEXT, preview TEXT, updated_at INTEGER)")
+            con.execute("INSERT INTO threads VALUES ('a', '', 'my secret prompt', ?)", (int(time.time()),))
+            con.commit()
+            con.close()
+            self.assertEqual(agents.codex_threads(db)[0][1], "")
+
+
+class Main(TempRuntime):
     def test_runs_on_this_machine(self):
         out = agents.collect({"usage": False})
         self.assertIn("groups", out)
         json.dumps(out)
+        self.assertTrue(os.path.exists(os.path.join(self._tmp.name, "eyemarchy", "agents.json")))
 
 
 if __name__ == "__main__":

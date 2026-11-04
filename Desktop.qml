@@ -29,7 +29,14 @@ Item {
 
   readonly property string pluginId: manifest && manifest.id ? String(manifest.id) : "io.github.harold15000.eyemarchy"
   readonly property string home: Quickshell.env("HOME")
-  readonly property string dir: decodeURIComponent(Qt.resolvedUrl(".").toString().replace(/^file:\/\//, ""))
+  // The plugin folder, with a trailing slash. The shell hands it to third-party
+  // plugins as manifest.__sourceDir; the QML file's own URL is the fallback.
+  readonly property string dir: {
+    var d = manifest && manifest.__sourceDir ? String(manifest.__sourceDir)
+      : decodeURIComponent(Qt.resolvedUrl(".").toString())
+    d = d.replace(/^file:\/\//, "")
+    return d.charAt(d.length - 1) === "/" ? d : d + "/"
+  }
   readonly property string stateDir: (Quickshell.env("XDG_STATE_HOME") || (home + "/.local/state")) + "/" + pluginId
 
   // ================================================================ settings
@@ -98,7 +105,6 @@ Item {
   // ================================================================ visibility
   // Hidden with `toggleHidden` (SUPER + D); cfg.hideKeeps stay on screen.
   property bool userHidden: false
-  property bool stateReady: false
   FileView {
     id: stateFile
     path: desk.stateDir + "/state.json"
@@ -106,9 +112,7 @@ Item {
     atomicWrites: true
     onLoaded: {
       try { desk.userHidden = !!JSON.parse(text()).hidden } catch (e) {}
-      desk.stateReady = true
     }
-    onLoadFailed: desk.stateReady = true
   }
   Process { id: mkState; command: ["mkdir", "-p", desk.stateDir]; running: true }
   function setHidden(v) {
@@ -205,14 +209,16 @@ Item {
       return desk.demo ? "demo on" : "demo off"
     }
     // Change one setting from a script: `omarchy-shell eyemarchy configure agents.position top-right`.
-    // The value is read as JSON when it parses (true, 1.2, ["cpu"]), as text otherwise.
+    // Numbers and true/false are read as such. The IPC splits arguments on commas
+    // and brackets, so lists go as words: `configure system.rows "cpu ram gpu"`,
+    // `configure screens "DP-1 eDP-1"`. agents.custom is set in shell.json.
     function configure(key: string, value: string): string {
       if (Settings.valueOf(Settings.DEFAULTS, key) === undefined) return "unknown setting " + key
       var v = value
       try { v = JSON.parse(value) } catch (e) {}
-      // The IPC splits arguments on commas, so lists also come as "cpu ram gpu".
-      if (Array.isArray(Settings.valueOf(Settings.DEFAULTS, key)) && typeof v === "string")
-        v = v.split(/[\s|]+/).filter(function(x) { return x !== "" })
+      var words = typeof v === "string" ? v.split(/[\s|]+/).filter(function(x) { return x !== "" }) : []
+      if (Array.isArray(Settings.valueOf(Settings.DEFAULTS, key)) && typeof v === "string") v = words
+      else if (key === "screens" && typeof v === "string" && v !== "all" && v !== "focused") v = words
       var next = Settings.normalize(Settings.withValue(desk.cfg, key, v))
       if (JSON.stringify(Settings.valueOf(next, key)) !== JSON.stringify(v)) return "invalid value for " + key
       desk.setOption(key, v)
@@ -370,6 +376,7 @@ Item {
 
   // ================================================================ agents
   property var groups: []
+  property int agentsFailures: 0
   property string agentsSig: ""
   property double nowMs: Date.now()
   readonly property int workingCount: countState("working")
@@ -420,8 +427,11 @@ Item {
             desk.agentsSig = sig
             desk.groups = next
           }
+          desk.agentsFailures = 0
         } catch (e) {
-          console.warn("eyemarchy: invalid output from agents.py", e)
+          // Three bad readings in a row: better no agents than frozen ones.
+          if (++desk.agentsFailures === 1) console.warn("eyemarchy: invalid output from agents.py", e)
+          if (desk.agentsFailures === 3) { desk.agentsSig = ""; desk.groups = [] }
         }
       }
     }
@@ -1034,7 +1044,6 @@ Item {
   // ================================================================ settings panel
   property bool settingsOpen: false
   property int settingsIndex: 0
-  property bool settingsSummoned: false
 
   function openSettings() {
     settingsIndex = 0
@@ -1114,7 +1123,8 @@ Item {
     var list = Quickshell.screens
     var out = []
     for (var i = 0; i < list.length; i++) if (screenAllowed(list[i])) out.push(list[i])
-    return out
+    // None of the named screens is connected (a laptop off its dock): use them all.
+    return out.length > 0 ? out : list
   }
 
   Variants {
@@ -1224,7 +1234,14 @@ Item {
         readonly property var cards: desk.slotCards(slot)
         readonly property int zx: desk.zoneX(slot)
         readonly property bool interactive: visible && cards.some(function(c) { return c !== "clock" })
-        readonly property real anchorHeight: rep.count > 0 && rep.itemAt(0) ? rep.itemAt(0).height : 0
+        // The center slot is placed by its first visible card (the clock, usually).
+        readonly property real anchorHeight: {
+          for (var i = 0; i < rep.count; i++) {
+            var l = rep.itemAt(i)
+            if (l && l.item && l.item.opacity > 0) return l.height
+          }
+          return 0
+        }
 
         visible: cards.length > 0 && win.cardsHere && !(desk.settingsOpen && win.isSummoned)
         spacing: desk.px(slot === "center" ? 28 : 16)
@@ -1242,6 +1259,9 @@ Item {
           model: slotCol.cards
           delegate: Loader {
             required property string modelData
+            // A faded-out card takes no room, so the next one moves up. (Not
+            // item.visible: that one also depends on this Loader.)
+            visible: item !== null && item.opacity > 0
             anchors.left: slotCol.zx === 0 ? parent.left : undefined
             anchors.right: slotCol.zx === 2 ? parent.right : undefined
             anchors.horizontalCenter: slotCol.zx === 1 ? parent.horizontalCenter : undefined

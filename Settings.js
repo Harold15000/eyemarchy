@@ -99,8 +99,9 @@ function normalize(entry) {
   var e = isObject(entry) ? entry : {}
   var c = section(e, "clock"), a = section(e, "agents"), m = section(e, "media"), s = section(e, "system")
 
+  // "all", "focused" or a list of output names; an empty list means "all".
   var screens = d.screens
-  if (Array.isArray(e.screens)) screens = strings(e.screens, [])
+  if (Array.isArray(e.screens)) screens = strings(e.screens, []).length ? strings(e.screens, []) : d.screens
   else if (e.screens === "focused" || e.screens === "all") screens = e.screens
 
   var custom = []

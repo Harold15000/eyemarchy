@@ -49,24 +49,35 @@ HOLD_SECONDS = 6          # keep "working" a few seconds to avoid flicker
 CODEX_RECENT = 3600       # Codex threads updated in the last hour
 
 # Command-line agents recognised by their program name.
-#   (group id, group label, program names, extra matcher)
+#   (group id, group label, program names, extra matcher(argv, pid))
+# Generic names that other tools share need the extra matcher instead.
 PROCESS_AGENTS = [
     ("opencode", "OPENCODE", {"opencode"}, None),
     ("gemini", "GEMINI CLI", {"gemini"}, None),
-    ("grok", "GROK", {"grok"}, lambda argv: any("@xai-official/grok" in a for a in argv[:3])),
+    ("grok", "GROK", {"grok"}, lambda argv, pid: any("@xai-official/grok" in a for a in argv[:3])),
     ("antigravity", "ANTIGRAVITY", {"antigravity", "agy"}, None),
-    ("hermes", "HERMES", {"hermes"}, None),
+    # Hermes' own launcher is `python -I -c <code> <command>`.
+    ("hermes", "HERMES", {"hermes"},
+     lambda argv, pid: is_interpreter(prog(argv[0])) and any("hermes_cli" in a for a in argv[1:4])),
     ("aider", "AIDER", {"aider"}, None),
-    ("amp", "AMP", {"amp"}, None),
+    ("amp", "AMP", None, lambda argv, pid: is_amp(argv, pid)),
     ("crush", "CRUSH", {"crush"}, None),
-    ("goose", "GOOSE", {"goose"}, None),
+    ("goose", "GOOSE", None,       # not the database migration tool of the same name
+     lambda argv, pid: prog(argv[0]) == "goose" and not any(a in GOOSE_MIGRATIONS for a in argv[1:3])),
     ("cursor", "CURSOR AGENT", {"cursor-agent"}, None),
     ("qwen", "QWEN CODE", {"qwen"}, None),
-    ("copilot", "COPILOT CLI", {"copilot"}, None),
+    ("copilot", "COPILOT CLI", None,   # not the AWS Copilot CLI
+     lambda argv, pid: (interpreted(argv, {"copilot"}) or prog(argv[0]) == "copilot")
+     and not any(a in AWS_COPILOT for a in argv[1:2])),
     ("droid", "DROID", {"droid"}, None),
     ("kimi", "KIMI CLI", {"kimi"}, None),
     ("pi", "PI", {"pi"}, None),
 ]
+GOOSE_MIGRATIONS = {"up", "up-by-one", "up-to", "down", "down-to", "redo", "reset", "status",
+                    "version", "create", "fix", "validate", "postgres", "mysql", "sqlite3",
+                    "mssql", "redshift", "tidb", "clickhouse", "vertica", "ydb", "turso", "starrocks"}
+AWS_COPILOT = {"app", "svc", "env", "init", "job", "pipeline", "storage", "task", "deploy",
+               "run", "docs", "version", "completion", "secret"}
 
 # Agents that can show up as the remote command of an ssh session.
 REMOTE_NAMES = {
@@ -200,13 +211,63 @@ def prog(arg):
     return os.path.basename(arg.split(" ")[0]).lower()
 
 
+def is_interpreter(name):
+    """Programs that run a script, so the script names the agent (`node /usr/bin/gemini`)."""
+    return name in ("node", "nodejs", "bun", "deno") or bool(re.fullmatch(r"python[\d.]*", name))
+
+
+def script_arg(argv):
+    """The script (or `-m` module) an interpreter runs; "" for inline code."""
+    words = argv[1:]
+    for i, a in enumerate(words[:4]):
+        if a == "-m":
+            return words[i + 1] if i + 1 < len(words) else ""
+        if a in ("-c", "-e", "--eval", "-p", "--print"):
+            return ""
+        if not a.startswith("-"):
+            return a
+    return ""
+
+
+def interpreted(argv, names):
+    """An interpreter running a script called one of names."""
+    return len(argv) > 1 and is_interpreter(prog(argv[0])) and prog(script_arg(argv)) in names
+
+
 def is_cmd(argv, names):
-    """Is argv[0], or the script run by an interpreter (argv[1]), one of names?"""
-    return any(prog(a) in names for a in argv[:2])
+    """Is the program one of names, either itself or as the script of an
+    interpreter? Only interpreters count their argument: `nvim pi` is not Pi."""
+    return bool(argv) and (prog(argv[0]) in names or interpreted(argv, names))
+
+
+def command_words(argv):
+    """What comes after the program and its script or inline code."""
+    words = argv[1:]
+    if argv and is_interpreter(prog(argv[0])):
+        for i, a in enumerate(words):
+            if a in ("-c", "-e", "--eval", "-p", "--print", "-m"):
+                return words[i + 2:]
+            if not a.startswith("-"):
+                return words[i + 1:]
+        return []
+    return words
 
 
 def is_server(argv):
-    return any(a in SERVER_WORDS for a in argv[1:4])
+    return any(a in SERVER_WORDS for a in command_words(argv)[:3])
+
+
+def is_amp(argv, pid, proc=PROC):
+    """Sourcegraph's Amp: an npm script, or its own binary outside /usr (a
+    plain /usr/bin/amp is the text editor of the same name)."""
+    if interpreted(argv, {"amp"}):
+        return True
+    if prog(argv[0]) != "amp":
+        return False
+    try:
+        return not os.readlink(f"{proc}/{pid}/exe").startswith("/usr/")
+    except Exception:
+        return False
 
 
 class Tracker:
@@ -254,6 +315,40 @@ STATE_ORDER = {"working": 0, "waiting": 1, "idle": 2}
 
 # ------------------------------------------------------------------ sources
 
+def to_ms(value, default):
+    """A timestamp in ms from a number (seconds or ms) or an ISO date."""
+    try:
+        if isinstance(value, bool):
+            return default
+        if isinstance(value, (int, float)):
+            x = float(value)
+        elif isinstance(value, str) and value.strip():
+            s = value.strip()
+            if re.fullmatch(r"\d+(\.\d+)?", s):
+                x = float(s)
+            else:
+                t = parse_iso(s)
+                if t is None:
+                    return default
+                x = t * 1000
+        else:
+            return default
+        return int(x * 1000 if x < 1e11 else x)
+    except Exception:
+        return default
+
+
+def proc_start(pid, proc=PROC):
+    """starttime of /proc/<pid>/stat, or None."""
+    s = read(f"{proc}/{pid}/stat")
+    if not s:
+        return None
+    try:
+        return int(s[s.rindex(")") + 2:].split()[19])
+    except Exception:
+        return None
+
+
 def claude_code(tracker, home=HOME, proc=PROC):
     out = []
     config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(home, ".claude")
@@ -265,37 +360,51 @@ def claude_code(tracker, home=HOME, proc=PROC):
     for fn in files:
         if not fn.endswith(".json"):
             continue
-        try:
-            with open(os.path.join(sess_dir, fn)) as f:
-                d = json.load(f)
-            pid = int(d.get("pid", 0))
+        try:   # one odd file must not hide the other sessions
+            row = claude_session(os.path.join(sess_dir, fn), tracker, home, proc)
         except Exception:
-            continue
-        cmd = read(f"{proc}/{pid}/cmdline", "rb") if pid else None
-        if not cmd or b"claude" not in cmd:
-            continue  # stale session file
-        raw = str(d.get("status", "")).lower()
-        if raw == "busy":
-            state = "working"
-        elif any(w in raw for w in ("wait", "permission", "input", "approval", "blocked")):
-            state = "waiting"
-        else:
-            state = "idle"
-        cwd = d.get("cwd") or ""
-        name = d.get("name") or os.path.basename(cwd) or f"pid {pid}"
-        background = d.get("kind") in ("bg", "background")
-        since = d.get("statusUpdatedAt") or d.get("updatedAt") or now_ms
-        sid = str(d.get("sessionId", ""))
-        key = f"claude:{sid or pid}"
-        # Background sessions have no window: they are opened with `claude attach`.
-        target = ({"type": "attach", "id": sid[:8], "cwd": cwd or home}
-                  if background and sid else pid_target(pid))
-        tracker.transition(key, state, int(since))
-        out.append(agent(key, name, state, int(since), target,
-                         detail="" if background else os.path.basename(cwd),
-                         detail_code="background" if background else ""))
+            row = None
+        if row:
+            out.append(row)
     out.sort(key=lambda a: (STATE_ORDER[a["state"]], a["name"].lower()))
     return out
+
+
+def claude_session(path, tracker, home, proc):
+    with open(path) as f:
+        d = json.load(f)
+    if not isinstance(d, dict) or d.get("spare"):
+        return None   # a worker Claude Code keeps warm for the next job, not a session
+    pid = int(d.get("pid") or 0)
+    cmd = read(f"{proc}/{pid}/cmdline", "rb") if pid > 0 else None
+    if not cmd or b"claude" not in cmd:
+        return None   # stale session file
+    started = d.get("procStart")
+    if isinstance(started, (int, str)) and str(started).isdigit():
+        now_start = proc_start(pid, proc)
+        if now_start is not None and now_start != int(started):
+            return None   # the pid belongs to another process now
+    raw = str(d.get("status", "")).lower()
+    if raw == "busy":
+        state = "working"
+    elif any(w in raw for w in ("wait", "permission", "input", "approval", "blocked")):
+        state = "waiting"
+    else:
+        state = "idle"
+    cwd = d.get("cwd")
+    cwd = cwd if isinstance(cwd, str) else ""
+    name = str(d.get("name") or "").strip() or os.path.basename(cwd) or f"pid {pid}"
+    background = d.get("kind") in ("bg", "background")
+    since = to_ms(d.get("statusUpdatedAt"), 0) or to_ms(d.get("updatedAt"), 0) or now_ms
+    sid = str(d.get("sessionId") or "")
+    key = f"claude:{sid or pid}"
+    # Background sessions have no window: they are opened with `claude attach`.
+    target = ({"type": "attach", "id": sid[:8], "cwd": cwd or home}
+              if background and sid else pid_target(pid))
+    tracker.transition(key, state, since)
+    return agent(key, name[:60], state, since, target,
+                 detail="" if background else os.path.basename(cwd),
+                 detail_code="background" if background else "")
 
 
 def ssh_host(argv):
@@ -378,7 +487,7 @@ def process_agents(procs, kids, tracker, prefix, names=None, match=None, label=N
         argv = p["argv"]
         if not argv or prog(argv[0]) == "ssh" or (skip_servers and is_server(argv)):
             continue
-        if (names and is_cmd(argv, names)) or (match and match(argv)):
+        if (names and is_cmd(argv, names)) or (match and match(argv, pid)):
             hits.add(pid)
     roots = [pid for pid in hits if procs[pid]["ppid"] not in hits]
     out = []
@@ -409,9 +518,8 @@ def codex_threads(db, limit=4):
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1)
         cols = {r[1] for r in con.execute("PRAGMA table_info(threads)")}
         title = [c for c in ("name", "title") if c in cols]
-        title_expr = "COALESCE(" + ", ".join([f"NULLIF({c},'')" for c in title] +
-                                             (["substr(preview,1,60)"] if "preview" in cols else []) +
-                                             ["''"]) + ")"
+        # Only the title: never the preview or the first message of a thread.
+        title_expr = "COALESCE(" + ", ".join([f"NULLIF({c},'')" for c in title] + ["''"]) + ")"
         updated = "updated_at_ms" if "updated_at_ms" in cols else "updated_at * 1000"
         where = "archived = 0 AND " if "archived" in cols else ""
         cwd = "cwd" if "cwd" in cols else "''"
@@ -441,12 +549,13 @@ def codex(procs, kids, tracker, home=HOME):
               else (engines[0]["target"] if engines else {}))
     threads = []
     for i, (tid, title, cwd, updated) in enumerate(codex_threads(codex_db(home))):
-        recent = now_ms - (updated or 0) < 20000
+        recent = now_ms - to_ms(updated, 0) < 20000
         state = "working" if (busy and i == 0) or recent else "idle"
         key = f"codex:{tid}"
         _, since = tracker.transition(key, state)
         title = (str(title or "").strip().splitlines() or [""])[0][:60]
-        threads.append(agent(key, title, state, since, target, detail=os.path.basename(cwd or ""),
+        threads.append(agent(key, title, state, since, target,
+                             detail=os.path.basename(cwd if isinstance(cwd, str) else ""),
                              detail_code="" if title else "untitled"))
     if threads:
         return threads
@@ -470,7 +579,7 @@ def custom_agents(procs, kids, tracker, custom):
                 continue
         if not names and not pattern:
             continue
-        match = (lambda argv, p=pattern: bool(p.search(" ".join(argv)))) if pattern else None
+        match = (lambda argv, pid, p=pattern: bool(p.search(" ".join(argv)))) if pattern else None
         gid = f"custom:{re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-') or i}"
         rows = process_agents(procs, kids, tracker, gid, names, match)
         if rows:
@@ -491,18 +600,23 @@ def usage_records(home=HOME):
                 rec = json.load(f)
         except Exception:
             continue
+        if not isinstance(rec, dict) or not isinstance(rec.get("limits"), list):
+            continue
         best = None
-        for lim in rec.get("limits") or []:
+        for lim in rec["limits"]:
+            if not isinstance(lim, dict):
+                continue
             try:
                 pct = float(lim.get("percent"))
             except (TypeError, ValueError):
                 continue
-            resets = lim.get("resetsAt") or ""
+            resets = lim.get("resetsAt") if isinstance(lim.get("resetsAt"), str) else ""
             reset_at = parse_iso(resets) if resets else None
             if reset_at is not None and reset_at < now:
                 continue
+            label = lim.get("label") if isinstance(lim.get("label"), str) else ""
             if best is None or pct > best["percent"]:
-                best = {"percent": pct, "short": short_window(lim.get("label") or ""), "resetsAt": resets}
+                best = {"percent": pct, "short": short_window(label), "resetsAt": resets}
         if best:
             out[str(rec.get("id") or os.path.splitext(os.path.basename(path))[0])] = best
     return out
@@ -533,8 +647,18 @@ def short_window(label):
 
 # -------------------------------------------------------------------- main
 
+def safe(fn, default):
+    """Run one source; if it breaks (an odd file, a new format), the others still show."""
+    try:
+        return fn()
+    except Exception as e:
+        print(f"eyemarchy: a source failed: {e!r}", file=sys.stderr)
+        return default
+
+
 def collect(config, home=HOME):
-    hidden = set(config.get("hide") or [])
+    hide = config.get("hide")
+    hidden = {str(x) for x in hide} if isinstance(hide, list) else set()
     path = os.path.join(state_dir(), "agents.json")
     tracker = Tracker(load_state(path))
     procs = scan_procs()
@@ -550,15 +674,15 @@ def collect(config, home=HOME):
     for gid, label, fn in groups:
         if gid in hidden:
             continue
-        rows = fn()
+        rows = safe(fn, [])
         if rows:
             result.append({"id": gid, "label": label, "agents": rows})
     if config.get("remote", True):
-        result.extend(remote_agents(procs, tracker, hidden))
-    result.extend(g for g in custom_agents(procs, kids, tracker, config.get("custom"))
+        result.extend(safe(lambda: remote_agents(procs, tracker, hidden), []))
+    result.extend(g for g in safe(lambda: custom_agents(procs, kids, tracker, config.get("custom")), [])
                   if g["id"] not in hidden)
 
-    usage = usage_records(home) if config.get("usage", True) else {}
+    usage = safe(lambda: usage_records(home), {}) if config.get("usage", True) else {}
     for g in result:
         g["usage"] = usage.get(g["id"].split(":")[0]) if not g["id"].startswith("remote:") else None
 

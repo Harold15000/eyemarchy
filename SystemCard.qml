@@ -131,6 +131,7 @@ CardFrame {
       font.family: Style.fontFamily
       font.pixelSize: card.host.px(12)
       elide: Text.ElideRight
+      maximumLineCount: 1
     }
     Text {
       anchors.left: appName.right
@@ -143,6 +144,7 @@ CardFrame {
       font.family: Style.fontFamily
       font.pixelSize: card.host.px(10)
       elide: Text.ElideRight
+      maximumLineCount: 1
     }
     Text {
       id: valueText

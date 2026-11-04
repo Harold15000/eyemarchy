@@ -9,6 +9,10 @@
 Every process is grouped under its "root": the ancestor started by the
 desktop (a child of Hyprland or systemd). Chromium or Spotify count as one
 app even with twenty processes, and a terminal includes what runs inside it.
+A terminal that serves several windows from one process (Ghostty, kitty or
+WezTerm in single-instance mode, foot as a server) is split instead: one row
+per program inside, plus one for the terminal itself, so closing a program
+never takes the other windows with it.
 Hyprland, the shell, PipeWire, the portals and root processes add up to one
 "System" row that cannot be closed. Only apps you started can be closed;
 services and desktop helpers point to btop instead.
@@ -44,7 +48,13 @@ TERMINALS = {"ghostty", "alacritty", "kitty", "foot", "wezterm-gui", "wezterm",
              "konsole", "gnome-terminal-", "xterm"}
 WRAPPERS = {"bash", "zsh", "fish", "sh", "dash", "nu", "setsid", "uwsm-app", "env",
             "xdg-terminal-exec", "timeout", "nohup", "gtk-launch", "tmux"}
-INTERPRETERS = {"node", "python", "python3", "bun", "deno", "ruby", "perl"}
+SHELLS = {"bash", "sh", "zsh", "dash", "fish"}
+INTERPRETERS = {"node", "python", "bun", "deno", "ruby", "perl"}
+# Options that run code given on the command line instead of a script.
+INLINE = {"node": {"-e", "--eval", "-p", "--print"}, "bun": {"-e", "--eval", "-p", "--print"},
+          "deno": {"eval"}, "ruby": {"-e"}, "perl": {"-e", "-E"}}
+# Options followed by a value, so that value is not the script.
+VALUE_OPTS = {"-W", "-X", "-r", "--require", "--import", "--loader", "--experimental-loader"}
 # Desktop helpers: listed, but never offered for closing.
 HELPERS = {"udiskie", "hypridle", "hyprsunset", "hyprpaper", "swaybg", "swayosd-server",
            "mako", "walker", "elephant", "waybar", "fcitx5", "voxtype", "hyprpolkitagent",
@@ -56,7 +66,8 @@ PRETTY = {"claude": "Claude Code", "chatgpt": "ChatGPT", "codex": "Codex",
           "voxtype": "Voxtype", "btop": "btop", "ssh": "ssh", "obsidian": "Obsidian",
           "code": "VS Code", "firefox": "Firefox", "steam": "Steam", "discord": "Discord",
           "gnome-keyring-daemon": "Keyring", "fcitx5": "Fcitx5", "udiskie": "Udiskie",
-          "localsearch-3": "Local search", "xdg-desktop-portal-gtk": "GTK portal"}
+          "localsearch-3": "Local search", "xdg-desktop-portal-gtk": "GTK portal",
+          "python": "Python", "python3": "Python", "node": "Node.js", "claude-desktop": "Claude"}
 # Omarchy's default web apps, by host.
 WEB_APPS = {"youtube.com": "YouTube", "web.whatsapp.com": "WhatsApp", "x.com": "X",
             "app.hey.com": "HEY", "hey.com": "HEY", "github.com": "GitHub", "chatgpt.com": "ChatGPT",
@@ -212,8 +223,11 @@ _wm_classes = None
 
 
 def name_in(txt, lang):
-    m = (lang and re.search(rf"^Name\[{re.escape(lang)}\]=(.+)$", txt, re.M)) or \
-        re.search(r"^Name=(.+)$", txt, re.M)
+    # Only the main section: actions ([Desktop Action new-window]) have names too.
+    m = re.search(r"^\[Desktop Entry\][^\n]*\n(.*?)(?=^\[|\Z)", txt, re.M | re.S)
+    body = m.group(1) if m else txt
+    m = (lang and re.search(rf"^Name\[{re.escape(lang)}\]=(.+)$", body, re.M)) or \
+        re.search(r"^Name=(.+)$", body, re.M)
     return m.group(1).strip() if m else None
 
 
@@ -268,18 +282,61 @@ def pretty_class(cls):
     return PRETTY.get(word.lower(), word[:1].upper() + word[1:])
 
 
+def clean(text, limit=40):
+    """One short line: names come from command lines and window titles."""
+    line = (str(text or "").splitlines() or [""])[0]
+    return re.sub(r"[\x00-\x1f\x7f]", "", line).strip()[:limit]
+
+
+def interpreter(name):
+    """'python' for python3.14, 'node' for nodejs, the shell for a shell; None otherwise."""
+    n = (name or "").lower()
+    if n in SHELLS:
+        return n
+    n = re.sub(r"^(python|ruby|perl)[\d.]*$", r"\1", n)
+    n = "node" if n == "nodejs" else n
+    return n if n in INTERPRETERS else None
+
+
+def script_of(interp, a):
+    """What an interpreter runs: the script, the module of `python -m`, or ""
+    for code given inline (python -c, bash -lc, node -e)."""
+    i = 1
+    while i < len(a):
+        x = a[i]
+        if interp == "python" and x == "-m":
+            return a[i + 1].split(".")[0] if i + 1 < len(a) else ""
+        if x in INLINE.get(interp, ()) or (
+                (interp in SHELLS or interp == "python") and re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", x)):
+            return ""
+        if x in VALUE_OPTS:
+            i += 2
+            continue
+        if x.startswith("-") or (interp in ("bun", "deno") and x == "run"):
+            i += 1
+            continue
+        return x
+    return ""
+
+
 def prog_name(pid, procs):
     """Readable name of a process; for node/python, the name of the script."""
     comm = procs[pid]["comm"]
     a = argv(pid)
     base = os.path.basename(a[0].split(" ")[0]) if a else comm
-    if base.lower() in INTERPRETERS | {"bash", "sh", "zsh", "dash"} or comm.lower() in INTERPRETERS:
-        script = next((x for x in a[1:] if not x.startswith("-")), "")
+    interp = interpreter(base) or interpreter(comm)
+    if interp and a:
+        script = script_of(interp, a)
         if script:
-            base = os.path.splitext(os.path.basename(script))[0]
-            if base in ("index", "cli", "main") and "/" in script:
-                base = os.path.basename(os.path.dirname(script))
-    base = base or comm
+            name = os.path.splitext(os.path.basename(script.rstrip("/")))[0]
+            if name in ("index", "cli", "main", "__main__") and "/" in script:
+                # .../openclaw/dist/index.js -> openclaw
+                parts = [x for x in script.split("/")[:-1] if x]
+                while len(parts) > 1 and parts[-1] in ("dist", "build", "lib", "bin", "src", "out"):
+                    parts.pop()
+                name = parts[-1] if parts else name
+            base = name or base
+    base = clean(base) or clean(comm)
     return PRETTY.get(base.lower(), base[:1].upper() + base[1:])
 
 
@@ -289,18 +346,122 @@ def fmt(mode, v):
     return f"{v:.1f}%" if v < 10 else f"{round(v)}%"
 
 
-def main(mode, lang=""):
-    procs = scan()
-    vals = cpu_values(procs) if mode == "cpu" else {p: ram_of(p, procs) for p in procs}
-    root = roots(procs)
-    wins = windows()
+def exe(pid):
+    try:
+        return os.readlink(f"/proc/{pid}/exe")
+    except Exception:
+        return None
 
-    groups, system = {}, {"value": 0.0}
+
+def tmux_session(pids):
+    """ssh + tmux: the session name says what it is (hermes-work, say)."""
+    for p in pids:
+        m = re.search(r"\btmux\b.*?-s\s+(\S+)", " ".join(argv(p)))
+        if m:
+            return m.group(1).strip("'\"")
+    return ""
+
+
+def programs(r, pids, procs):
+    """The programs inside terminal r. For every process, the first one below
+    the terminal that is not a shell or a wrapper (claude, nvim, ssh...).
+    Returns {program pid: the pids of its tree} and the pids of the terminal
+    itself (the terminal, its shells)."""
+    members = set(pids)
+    progs, rest = {}, []
+    for p in pids:
+        chain, q = [], p
+        while q in members and q != r:
+            chain.append(q)
+            q = procs[q]["ppid"]
+        top = next((x for x in reversed(chain)
+                    if procs[x]["comm"].lower() not in WRAPPERS | TERMINALS), None)
+        if top is None:
+            rest.append(p)
+        else:
+            progs.setdefault(top, []).append(p)
+    return progs, rest
+
+
+def rows_for(r, g, procs, vals, lang):
+    """The row of one app, or several for a terminal with several windows."""
+    rcomm = procs[r]["comm"]
+
+    def total(pids):
+        return sum(vals.get(p, 0) for p in pids)
+
+    def row(pid, name, detail, code, value, closable):
+        return {"key": f"{pid}:{procs[pid]['start']}", "pid": pid, "start": procs[pid]["start"],
+                "name": clean(name), "detail": clean(detail), "detailCode": code,
+                "value": value, "closable": closable}
+
+    # Closable: apps with a window, or started by you even if they live in the
+    # tray (own scope or D-Bus activated, like Telegram). User services and
+    # Omarchy helpers are not closed from here.
+    cg = cgroup(r)
+    service = cg.split("/")[-1].endswith(".service") and "app-dbus" not in cg
+    helper = rcomm in HELPERS or rcomm.startswith("omarchy") or \
+        os.path.basename((argv(r) or [""])[0]).startswith("omarchy")
+    closable = not helper and (bool(g["wins"]) or not service)
+
+    if not g["wins"]:
+        rep = r
+        while procs[rep]["comm"].lower() in WRAPPERS:
+            kids = [p for p in g["pids"] if procs[p]["ppid"] == rep]
+            if len(kids) != 1:
+                break
+            rep = kids[0]
+        code = "omarchy" if helper and rcomm.startswith("omarchy") else \
+            ("service" if service or helper else "background")
+        return [row(r, prog_name(rep, procs), "", code, g["value"], closable)]
+
+    w = sorted(g["wins"], key=lambda c: c.get("focusHistoryID", 1 << 30))[0]
+    cls = w.get("class") or w.get("initialClass") or ""
+    nwin = len(g["wins"])
+    if rcomm.lower() not in TERMINALS:
+        name = desktop_name(cls, lang) or pretty_class(cls) or prog_name(r, procs)
+        if nwin > 1:
+            return [row(r, name, str(nwin), "windows", g["value"], closable)]
+        return [row(r, name, "", "", g["value"], closable)]
+
+    # A terminal: what runs inside matters (Claude Code, ssh, nvim...).
+    own_class = cls.lower().endswith(rcomm.lower())
+    term = (desktop_name(cls, lang) if own_class else None) or \
+        PRETTY.get(rcomm.lower(), rcomm.capitalize())
+    progs, rest = programs(r, g["pids"], procs)
+    if nwin > 1:
+        # One process serves several windows: closing it would close them
+        # all. Each program inside gets its own row (closing it leaves its
+        # window at the shell prompt) and the terminal keeps the rest.
+        out = []
+        for q, pids in progs.items():
+            sess = tmux_session(pids)
+            out.append(row(q, prog_name(q, procs), sess or term, "" if sess else "in",
+                           total(pids), not helper))
+        out.append(row(r, term, str(nwin), "windows", total(rest), closable))
+        return out
+    if not progs:
+        return [row(r, term, w.get("title") or "", "", g["value"], closable)]
+    top = max(progs, key=lambda q: total(progs[q]))
+    name, detail, code = prog_name(top, procs), term, "in"
+    if not own_class:
+        name = pretty_class(cls)  # a web app or launcher with its own class
+        sess = tmux_session(g["pids"])
+        if sess:
+            detail, code = sess, ""
+    # One window: closing the terminal closes just that window.
+    return [row(r, name, detail, code, g["value"], closable)]
+
+
+def build(procs, vals, wins, lang=""):
+    """The rows, heaviest first: apps of the user plus one System row."""
+    root = roots(procs)
+    groups, system = {}, 0.0
     for pid in procs:
         v = vals.get(pid, 0)
         r = root[pid]
         if r not in procs or is_system(r, procs):
-            system["value"] += v
+            system += v
             continue
         g = groups.setdefault(r, {"value": 0.0, "pids": [], "wins": []})
         g["value"] += v
@@ -313,11 +474,6 @@ def main(mode, lang=""):
 
     # Stray processes of an app with a window (a Spotify helper left hanging
     # from systemd, say) count towards that app: same executable.
-    def exe(pid):
-        try:
-            return os.readlink(f"/proc/{pid}/exe")
-        except Exception:
-            return None
     windowed = {exe(r): r for r, g in groups.items() if g["wins"] and exe(r)}
     for r in [r for r, g in groups.items() if not g["wins"]]:
         owner = windowed.get(exe(r))
@@ -325,63 +481,17 @@ def main(mode, lang=""):
             groups[owner]["value"] += groups[r]["value"]
             groups[owner]["pids"] += groups.pop(r)["pids"]
 
-    items = []
-    for r, g in groups.items():
-        rcomm = procs[r]["comm"]
-        detail, code = "", ""
-        if g["wins"]:
-            w = sorted(g["wins"], key=lambda c: c.get("focusHistoryID", 1 << 30))[0]
-            cls = w.get("class") or w.get("initialClass") or ""
-            if rcomm.lower() in TERMINALS:
-                # In a terminal, what runs inside matters (Claude Code, ssh, nvim...).
-                inner = [p for p in g["pids"] if p != r
-                         and procs[p]["comm"].lower() not in WRAPPERS | TERMINALS]
-                term = desktop_name(cls, lang) if cls.lower().endswith(rcomm.lower()) else None
-                term = term or PRETTY.get(rcomm.lower(), rcomm.capitalize())
-                if inner:
-                    top = max(inner, key=lambda p: vals.get(p, 0))
-                    name, detail, code = prog_name(top, procs), term, "in"
-                    if not cls.lower().endswith(rcomm.lower()):
-                        name = pretty_class(cls)  # a web app or launcher with its own class
-                        # ssh + tmux: the session name says what it is (hermes-work, say).
-                        sess = next((m.group(1) for p in inner for m in
-                                     [re.search(r"\btmux\b.*?-s\s+(\S+)", " ".join(argv(p)))] if m), "")
-                        if sess:
-                            detail, code = sess.strip("'\""), ""
-                else:
-                    name, detail = term, (w.get("title") or "")[:40]
-            else:
-                name = desktop_name(cls, lang) or pretty_class(cls) or prog_name(r, procs)
-            if len(g["wins"]) > 1 and not detail:
-                detail, code = str(len(g["wins"])), "windows"
-        else:
-            rep = r
-            while procs[rep]["comm"].lower() in WRAPPERS:
-                kids = [p for p in g["pids"] if procs[p]["ppid"] == rep]
-                if len(kids) != 1:
-                    break
-                rep = kids[0]
-            name = prog_name(rep, procs)
-        # Closable: apps with a window, or started by you even if they live in the
-        # tray (own scope or D-Bus activated, like Telegram). User services and
-        # Omarchy helpers are not closed from here.
-        cg = cgroup(r)
-        service = cg.split("/")[-1].endswith(".service") and "app-dbus" not in cg
-        helper = rcomm in HELPERS or rcomm.startswith("omarchy") or \
-            os.path.basename((argv(r) or [""])[0]).startswith("omarchy")
-        closable = not helper and (bool(g["wins"]) or not service)
-        if not g["wins"]:
-            detail = ""
-            code = "omarchy" if helper and rcomm.startswith("omarchy") else \
-                ("service" if service or helper else "background")
-        items.append({"key": f"{r}:{procs[r]['start']}", "pid": r, "start": procs[r]["start"],
-                      "name": name, "detail": detail, "detailCode": code, "value": g["value"],
-                      "closable": closable})
-
+    items = [it for r, g in groups.items() for it in rows_for(r, g, procs, vals, lang)]
     items.append({"key": "system", "pid": 0, "start": 0, "name": "", "detail": "",
-                  "detailCode": "system", "value": system["value"], "closable": False})
+                  "detailCode": "system", "value": system, "closable": False})
     items.sort(key=lambda it: it["value"], reverse=True)
-    items = items[:LIMIT]
+    return items[:LIMIT]
+
+
+def main(mode, lang=""):
+    procs = scan()
+    vals = cpu_values(procs) if mode == "cpu" else {p: ram_of(p, procs) for p in procs}
+    items = build(procs, vals, windows(), lang)
     for it in items:
         it["text"] = fmt(mode, it["value"])
     print(json.dumps({"mode": mode, "items": items}, ensure_ascii=False))

@@ -35,7 +35,7 @@ window with one key.
 - **Yours.** Every card can go to any corner, top, bottom or center, or be hidden. Size, background, language, screens: change them in a settings panel, no JSON needed.
 - **Native.** It is an Omarchy shell plugin: it follows your theme, font and bar position the moment you change them.
 - **Light.** No extra runtime, no hooks to install in your agents, no daemon: four small Python scripts that ship with the plugin, and the system card only refreshes while you can see it.
-- **Private.** Everything is read locally from `/proc`, `/sys` and the agents' own state files. No network, no telemetry, no conversation content.
+- **Private.** Everything is read locally from `/proc`, `/sys` and the agents' own state files. No telemetry, no requests of its own, no conversation content.
 
 <div align="center">
 <img src="docs/demo.gif" alt="Moving between cards with the arrow keys, unfolding the CPU list and opening the settings" width="100%">
@@ -174,9 +174,10 @@ Built to work on any Omarchy machine. Rows the machine does not have are simply 
 
 ## Privacy and safety
 
-- No network access at all. No telemetry.
-- It reads process names, CPU counters and the agents' status files. It never reads conversations; the only text it shows from an agent is the title of recent Codex threads.
-- Closing an app only ever sends a signal to *your* processes, checks the process is still the same one (by its start time), and refuses the compositor, the shell, audio and the session. It asks before closing, and offers a force quit only if the app does not respond.
+- No telemetry and no network requests of its own. The one thing that can come from the internet is the cover of the song playing, when your player gives a web address for it (Spotify does).
+- It reads process names, CPU counters and the agents' status files. It never reads conversations: the only text it shows from an agent is the title of a Codex thread, never its messages.
+- Closing an app only ever sends a signal to *your* processes, checks the process is still the same one (by its start time, through a pidfd), and refuses the compositor, the shell, audio and the session. It asks before closing, and offers a force quit only if the app does not respond.
+- A terminal that serves several windows from one process (Ghostty, kitty or WezTerm in single-instance mode, foot as a server) gets one row per program inside it, so closing Claude Code there never closes your other terminal windows.
 - No root, no extra packages, no background services: it runs inside the Omarchy shell and stops with it.
 
 ## Uninstall
@@ -193,6 +194,7 @@ you added them. The only file it keeps is `~/.local/state/io.github.harold15000.
 
 - **Nothing shows up.** `omarchy plugin list` should list it as enabled; `omarchy-shell eyemarchy state` prints what it sees.
 - **Arrow keys do nothing.** They only act on an empty desktop of the focused screen, and step aside when a menu is open. Check `keyboard` is `true`.
+- **Arrow keys stop working while some other program is running.** Eyemarchy gives way to any layer that may want the keyboard: menus and launchers, but also a second bar or a dock from another program. If one of those stays on screen all the time, use `SUPER + ALT + D` instead.
 - **An agent is missing.** Run `python3 ~/.config/omarchy/plugins/io.github.harold15000.eyemarchy/scripts/agents.py` and open an issue with the output.
 - **Try it without agents.** `omarchy-shell eyemarchy demo on` fills the cards with sample data; `demo off` goes back.
 

@@ -4,14 +4,18 @@ Thanks for helping. Small, focused pull requests are the easiest to review.
 
 ## Develop
 
-1. Clone the repository straight into your plugins folder, named after the plugin id:
+1. Fork the repository and install your fork as the plugin (remove the
+   installed copy first with `omarchy plugin remove io.github.harold15000.eyemarchy`):
 
    ```bash
-   git clone https://github.com/Harold15000/eyemarchy ~/.config/omarchy/plugins/io.github.harold15000.eyemarchy
-   omarchy plugin enable io.github.harold15000.eyemarchy
+   omarchy plugin add https://github.com/<you>/eyemarchy --enable
+   cd ~/.config/omarchy/plugins/io.github.harold15000.eyemarchy
+   git switch -c my-change
    ```
 
-2. Edit. The Omarchy shell reloads the plugin every time you save a file.
+2. Edit. Scripts in `scripts/` are read fresh every time they run. After
+   changing a QML or JS file run `omarchy restart shell`: a running service
+   plugin is not reloaded on save.
 3. Watch the log for warnings: `journalctl --user -f | grep -i eyemarchy`.
 4. `omarchy-shell eyemarchy demo on` fills the cards with sample data, and
    `omarchy-shell eyemarchy press Down` (or `Left`, `Return`, `Comma`…) drives the
@@ -26,6 +30,12 @@ omarchy plugin validate .                  # the manifest, as the shell checks i
 ```
 
 Run them before opening a pull request.
+
+## Screenshots
+
+`.github/capture.sh` makes the README captures on a real Omarchy machine. It
+switches themes on screen for about two minutes and restores your theme,
+wallpaper and workspace at the end. You never need it to use the plugin.
 
 ## Layout
 
