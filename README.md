@@ -42,6 +42,14 @@ window with one key.
 <img src="docs/demo.gif" alt="Moving between cards with the arrow keys, unfolding the CPU list and opening the settings" width="100%">
 </div>
 
+## It wears your theme
+
+Colors, font and corners come from your Omarchy theme, light or dark, and change with it.
+
+<div align="center">
+<img src="docs/themes.png" alt="Eyemarchy in Tokyo Night, Catppuccin Latte, Gruvbox and Retro 82" width="100%">
+</div>
+
 ## Install
 
 ```bash

@@ -40,15 +40,15 @@ class RemoteAgents(unittest.TestCase):
 
     def test_tmux_profiles_and_dedupe(self):
         procs = {
-            10: proc(["ssh", "-t", "nexus-pc", "tmux", "new", "-A", "-s", "hermes-default", "~/.local/bin/hermes"]),
-            11: proc(["ssh", "-t", "nexus-pc", "tmux", "new", "-A", "-s", "hermes-work", "~/.local/bin/hermes -p work"]),
-            12: proc(["ssh", "-t", "nexus-pc", "tmux", "new", "-A", "-s", "hermes-work", "~/.local/bin/hermes -p work"]),
+            10: proc(["ssh", "-t", "homelab", "tmux", "new", "-A", "-s", "hermes-default", "~/.local/bin/hermes"]),
+            11: proc(["ssh", "-t", "homelab", "tmux", "new", "-A", "-s", "hermes-work", "~/.local/bin/hermes -p work"]),
+            12: proc(["ssh", "-t", "homelab", "tmux", "new", "-A", "-s", "hermes-work", "~/.local/bin/hermes -p work"]),
             13: proc(["ssh", "box", "uptime"]),
         }
         groups = agents.remote_agents(procs, agents.Tracker({}), set())
         self.assertEqual(len(groups), 1)
         g = groups[0]
-        self.assertEqual(g["label"], "HERMES · NEXUS-PC")
+        self.assertEqual(g["label"], "HERMES · HOMELAB")
         self.assertEqual([a["name"] for a in g["agents"]], ["default", "work"])
 
     def test_claude_over_ssh(self):
