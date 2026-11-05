@@ -10,7 +10,7 @@ Keyboard-first, painted in your theme, and one shortcut away when your windows c
 ![Omarchy 4](https://img.shields.io/badge/Omarchy-4-8a7cff)
 ![License MIT](https://img.shields.io/badge/license-MIT-green)
 
-<img src="docs/hero.png" alt="Eyemarchy on an Omarchy desktop: agents on the left, clock and now playing in the center, system on the right" width="100%">
+<a href="https://eyemarchy.pages.dev"><img src="docs/launch-poster.jpg" alt="Watch the 42-second Eyemarchy launch video: agents on the left, clock and now playing in the center, system on the right" width="100%"></a>
 
 </div>
 
